@@ -1166,14 +1166,6 @@ void glTF2Exporter::ExportMeshes() {
         }
     }
 
-    Ref<Skin> skinRef;
-    std::string skinName = mAsset->FindUniqueID("skin", "skin");
-    std::vector<aiMatrix4x4> inverseBindMatricesData;
-    if (createSkin) {
-        skinRef = mAsset->skins.Create(skinName);
-        skinRef->name = skinName;
-    }
-    //----------------------------------------
 
     for (unsigned int idx_mesh = 0; idx_mesh < mScene->mNumMeshes; ++idx_mesh) {
         const aiMesh *aim = mScene->mMeshes[idx_mesh];
@@ -1280,6 +1272,21 @@ void glTF2Exporter::ExportMeshes() {
 //        }
         /*************** Skins ****************/
         if (aim->HasBones()) {
+
+            std::ostringstream oss;
+            oss << "skin_" << idx_mesh;
+            std::string skin_small_name = oss.str();
+            std::string skinName = mAsset->FindUniqueID(skin_small_name, "skin");
+
+            Ref<Skin> skinRef;
+            std::vector<aiMatrix4x4> inverseBindMatricesData;
+
+            if (createSkin) {
+                skinRef = mAsset->skins.Create(skinName);
+                skinRef->name = skinName;
+            }
+
+
             bool unlimitedBonesPerVertex =
                 this->mProperties->HasPropertyBool(
                         AI_CONFIG_EXPORT_GLTF_UNLIMITED_SKINNING_BONES_PER_VERTEX) &&
@@ -1287,7 +1294,56 @@ void glTF2Exporter::ExportMeshes() {
                         AI_CONFIG_EXPORT_GLTF_UNLIMITED_SKINNING_BONES_PER_VERTEX);
             ExportSkin(*mAsset, aim, m, b, skinRef, inverseBindMatricesData,
                     unlimitedBonesPerVertex);
-        }
+
+
+            // Finish the skin
+            // Create the Accessor for skinRef->inverseBindMatrices
+            bool bAddCustomizedProperty = this->mProperties->HasPropertyBool("GLTF2_CUSTOMIZE_PROPERTY");
+            if (createSkin) {
+                mat4 *invBindMatrixData = new mat4[inverseBindMatricesData.size()];
+                for (unsigned int idx_joint = 0; idx_joint < inverseBindMatricesData.size(); ++idx_joint) {
+                    CopyValue(inverseBindMatricesData[idx_joint], invBindMatrixData[idx_joint]);
+                }
+
+                Ref<Accessor> invBindMatrixAccessor = ExportData(*mAsset, skinName, b,
+                        static_cast<unsigned int>(inverseBindMatricesData.size()),
+                        invBindMatrixData, AttribType::MAT4, AttribType::MAT4, ComponentType_FLOAT);
+                if (invBindMatrixAccessor) {
+                    skinRef->inverseBindMatrices = invBindMatrixAccessor;
+                }
+
+                // Identity Matrix   =====>  skinRef->bindShapeMatrix
+                // Temporary. Hard-coded identity matrix here
+                skinRef->bindShapeMatrix.isPresent = bAddCustomizedProperty;
+                IdentityMatrix4(skinRef->bindShapeMatrix.value);
+
+                // Find nodes that contain a mesh with bones and add "skeletons" and "skin" attributes to those nodes.
+                Ref<Node> rootNode = mAsset->nodes.Get(unsigned(0));
+                Ref<Node> meshNode;
+                //for (unsigned int meshIndex = 0; meshIndex < mAsset->meshes.Size(); ++meshIndex) { //no loop
+
+
+                    Ref<Mesh> mesh = m; // mAsset->meshes.Get(meshIndex); //no loop
+                    bool hasBones = false;
+                    for (unsigned int i = 0; i < mesh->primitives.size(); ++i) {
+                        if (!mesh->primitives[i].attributes.weight.empty()) {
+                            hasBones = true;
+                            break;
+                        }
+                    }
+                    if (!hasBones) {
+                        continue;
+                    }
+                    std::string meshID = mesh->id;
+                    FindMeshNode(rootNode, meshNode, meshID);
+                    Ref<Node> rootJoint = FindSkeletonRootJoint(skinRef);
+                    if (bAddCustomizedProperty)
+                        meshNode->skeletons.push_back(rootJoint);
+                    meshNode->skin = skinRef;
+                //} //no loop
+                delete[] invBindMatrixData;
+            }
+         }
 
         /*************** Targets for blendshapes ****************/
         if (aim->mNumAnimMeshes > 0) {
@@ -1355,51 +1411,7 @@ void glTF2Exporter::ExportMeshes() {
     }
 
     //----------------------------------------
-    // Finish the skin
-    // Create the Accessor for skinRef->inverseBindMatrices
-    bool bAddCustomizedProperty = this->mProperties->HasPropertyBool("GLTF2_CUSTOMIZE_PROPERTY");
-    if (createSkin) {
-        mat4 *invBindMatrixData = new mat4[inverseBindMatricesData.size()];
-        for (unsigned int idx_joint = 0; idx_joint < inverseBindMatricesData.size(); ++idx_joint) {
-            CopyValue(inverseBindMatricesData[idx_joint], invBindMatrixData[idx_joint]);
-        }
 
-        Ref<Accessor> invBindMatrixAccessor = ExportData(*mAsset, skinName, b,
-                static_cast<unsigned int>(inverseBindMatricesData.size()),
-                invBindMatrixData, AttribType::MAT4, AttribType::MAT4, ComponentType_FLOAT);
-        if (invBindMatrixAccessor) {
-            skinRef->inverseBindMatrices = invBindMatrixAccessor;
-        }
-
-        // Identity Matrix   =====>  skinRef->bindShapeMatrix
-        // Temporary. Hard-coded identity matrix here
-        skinRef->bindShapeMatrix.isPresent = bAddCustomizedProperty;
-        IdentityMatrix4(skinRef->bindShapeMatrix.value);
-
-        // Find nodes that contain a mesh with bones and add "skeletons" and "skin" attributes to those nodes.
-        Ref<Node> rootNode = mAsset->nodes.Get(unsigned(0));
-        Ref<Node> meshNode;
-        for (unsigned int meshIndex = 0; meshIndex < mAsset->meshes.Size(); ++meshIndex) {
-            Ref<Mesh> mesh = mAsset->meshes.Get(meshIndex);
-            bool hasBones = false;
-            for (unsigned int i = 0; i < mesh->primitives.size(); ++i) {
-                if (!mesh->primitives[i].attributes.weight.empty()) {
-                    hasBones = true;
-                    break;
-                }
-            }
-            if (!hasBones) {
-                continue;
-            }
-            std::string meshID = mesh->id;
-            FindMeshNode(rootNode, meshNode, meshID);
-            Ref<Node> rootJoint = FindSkeletonRootJoint(skinRef);
-            if (bAddCustomizedProperty)
-                meshNode->skeletons.push_back(rootJoint);
-            meshNode->skin = skinRef;
-        }
-        delete[] invBindMatrixData;
-    }
 }
 
 // Merges a node's multiple meshes (with one primitive each) into one mesh with multiple primitives
@@ -1546,11 +1558,18 @@ void glTF2Exporter::ExportMetadata() {
     AssetMetadata &asset = mAsset->asset;
     asset.version = "2.0";
 
-    char buffer[256];
-    ai_snprintf(buffer, 256, "Open Asset Import Library (assimp v%d.%d.%x)",
-            aiGetVersionMajor(), aiGetVersionMinor(), aiGetVersionRevision());
-
-    asset.generator = buffer;
+    // Add generator info from metadata
+    aiString ai_generator;
+    std::string mvrs_generator;
+    if (mScene->mMetaData != nullptr && mScene->mMetaData->Get(AI_METADATA_SOURCE_GENERATOR, ai_generator)) {
+        mvrs_generator = ai_generator.C_Str();
+        asset.generator = mvrs_generator;
+    } else {
+        char buffer[256];
+        ai_snprintf(buffer, 256, "Open Asset Import Library (assimp v%d.%d.%x)",
+                aiGetVersionMajor(), aiGetVersionMinor(), aiGetVersionRevision());
+        asset.generator = buffer;
+    }
 
     // Copyright
     aiString copyright_str;
